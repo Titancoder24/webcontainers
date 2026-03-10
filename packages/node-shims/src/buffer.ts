@@ -294,6 +294,7 @@ export class Buffer extends Uint8Array {
     return maxLen;
   }
 
+  // @ts-expect-error - Buffer.slice returns Buffer, not Uint8Array
   slice(start?: number, end?: number): Buffer {
     const sliced = super.slice(start, end);
     const buf = new Buffer(sliced.length);
@@ -399,7 +400,8 @@ export class Buffer extends Uint8Array {
     };
   }
 
-  get [Symbol.toStringTag](): string {
+  // @ts-expect-error - overriding Uint8Array tag
+  get [Symbol.toStringTag](): 'Buffer' {
     return 'Buffer';
   }
 }

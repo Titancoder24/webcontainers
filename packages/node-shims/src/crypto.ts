@@ -7,7 +7,7 @@ import { Buffer } from './buffer.js';
 export function randomBytes(size: number): Buffer {
   const buf = Buffer.alloc(size);
   if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
-    crypto.getRandomValues(buf);
+    crypto.getRandomValues(buf as unknown as Uint8Array);
   } else {
     // Fallback: not cryptographically secure, but usable
     for (let i = 0; i < size; i++) {

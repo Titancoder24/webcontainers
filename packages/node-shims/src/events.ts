@@ -2,7 +2,8 @@
  * EventEmitter implementation for browser environment.
  */
 
-type Listener = (...args: unknown[]) => void;
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Listener = (...args: any[]) => void;
 
 interface WrappedListener {
   fn: Listener;

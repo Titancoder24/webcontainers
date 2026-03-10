@@ -1,38 +1,65 @@
+/**
+ * Child process shim using PROCESS_SPAWN syscall.
+ */
+
 import { EventEmitter } from './events.js';
 import { Readable, Writable } from './stream.js';
+import { Buffer } from './buffer.js';
+import { SyscallType } from '@aspect/shared';
+import type { SpawnOptions } from '@aspect/shared';
+
+type SyscallFn = (type: SyscallType, args: Record<string, unknown>) => unknown;
+
+function getSyscall(): SyscallFn {
+  const g = globalThis as unknown as { __syscall?: SyscallFn };
+  if (!g.__syscall) {
+    throw new Error('No syscall bridge available. child_process operations require a WebContainer runtime.');
+  }
+  return g.__syscall;
+}
 
 export class ChildProcess extends EventEmitter {
-  pid: number;
-  stdin: Writable | null;
-  stdout: Readable | null;
-  stderr: Readable | null;
+  pid: number = 0;
   exitCode: number | null = null;
   signalCode: string | null = null;
   killed: boolean = false;
   connected: boolean = true;
+  spawnfile: string = '';
+  spawnargs: string[] = [];
 
-  constructor(pid: number) {
+  stdin: Writable | null = null;
+  stdout: Readable | null = null;
+  stderr: Readable | null = null;
+
+  private _stdio: (Readable | Writable | null)[] = [];
+
+  constructor() {
     super();
-    this.pid = pid;
-    this.stdin = new Writable();
-    this.stdout = new Readable({ read() {} });
-    this.stderr = new Readable({ read() {} });
   }
 
-  kill(signal?: string): boolean {
-    this.killed = true;
-    this.signalCode = signal ?? 'SIGTERM';
+  kill(signal?: string | number): boolean {
+    if (this.killed) return false;
 
-    if (typeof (globalThis as any).__syscall === 'function') {
-      (globalThis as any).__syscall(51 /* PROCESS_KILL */, { pid: this.pid, signal: signal ?? 'SIGTERM' });
+    const sig = signal || 'SIGTERM';
+    this.killed = true;
+    this.signalCode = typeof sig === 'string' ? sig : `SIGNAL_${sig}`;
+
+    try {
+      const syscall = getSyscall();
+      syscall(SyscallType.PROCESS_KILL, { pid: this.pid, signal: sig });
+    } catch {
+      // Process may already be dead
     }
 
-    queueMicrotask(() => {
-      this.emit('exit', null, this.signalCode);
-      this.emit('close', null, this.signalCode);
-    });
-
     return true;
+  }
+
+  ref(): this {
+    return this;
+  }
+
+  unref(): this {
+    return this;
   }
 
   disconnect(): void {
@@ -40,31 +67,87 @@ export class ChildProcess extends EventEmitter {
     this.emit('disconnect');
   }
 
-  send(message: any, callback?: (err: Error | null) => void): boolean {
-    // IPC messaging via MessageChannel
-    if (callback) queueMicrotask(() => callback(null));
+  send(message: unknown, _sendHandle?: unknown, _options?: unknown, callback?: (error: Error | null) => void): boolean {
+    // IPC not fully supported in browser shim
+    if (callback) callback(null);
     return true;
   }
 
-  ref(): this { return this; }
-  unref(): this { return this; }
+  get stdio(): (Readable | Writable | null)[] {
+    return this._stdio;
+  }
+
+  _setupStdio(stdinOption?: string, stdoutOption?: string, stderrOption?: string): void {
+    if (stdinOption !== 'inherit') {
+      this.stdin = new Writable({
+        write: (_chunk: Buffer | string, _encoding: string, callback: (err?: Error | null) => void) => {
+          callback();
+        },
+      });
+    }
+
+    if (stdoutOption !== 'inherit') {
+      this.stdout = new Readable();
+    }
+
+    if (stderrOption !== 'inherit') {
+      this.stderr = new Readable();
+    }
+
+    this._stdio = [this.stdin, this.stdout, this.stderr];
+  }
 }
 
-export function spawn(command: string, args?: string[], options?: { cwd?: string; env?: Record<string, string>; stdio?: any }): ChildProcess {
-  const pid = Math.floor(Math.random() * 10000) + 100;
-  const child = new ChildProcess(pid);
+export function spawn(
+  command: string,
+  args?: string[] | SpawnOptions,
+  options?: SpawnOptions
+): ChildProcess {
+  let actualArgs: string[];
+  let actualOptions: SpawnOptions;
 
-  if (typeof (globalThis as any).__syscall === 'function') {
-    try {
-      (globalThis as any).__syscall(50 /* PROCESS_SPAWN */, {
-        cmd: command,
-        args: args ?? [],
-        cwd: options?.cwd ?? (globalThis as any).process?.cwd?.() ?? '/home/project',
-        env: options?.env ?? {},
+  if (Array.isArray(args)) {
+    actualArgs = args;
+    actualOptions = options || {};
+  } else {
+    actualArgs = [];
+    actualOptions = args || {};
+  }
+
+  const child = new ChildProcess();
+  child.spawnfile = command;
+  child.spawnargs = [command, ...actualArgs];
+
+  child._setupStdio(
+    actualOptions.stdin,
+    actualOptions.stdout,
+    actualOptions.stderr
+  );
+
+  try {
+    const syscall = getSyscall();
+    const result = syscall(SyscallType.PROCESS_SPAWN, {
+      cmd: command,
+      args: actualArgs,
+      cwd: actualOptions.cwd,
+      env: actualOptions.env,
+      stdin: actualOptions.stdin || 'pipe',
+      stdout: actualOptions.stdout || 'pipe',
+      stderr: actualOptions.stderr || 'pipe',
+    }) as { pid: number; error?: string };
+
+    if (result.error) {
+      queueMicrotask(() => {
+        child.emit('error', new Error(result.error));
       });
-    } catch {
-      // Spawn via syscall
+    } else {
+      child.pid = result.pid;
+      child.connected = true;
     }
+  } catch (err) {
+    queueMicrotask(() => {
+      child.emit('error', err instanceof Error ? err : new Error(String(err)));
+    });
   }
 
   return child;
@@ -72,76 +155,307 @@ export function spawn(command: string, args?: string[], options?: { cwd?: string
 
 export function exec(
   command: string,
-  options?: { cwd?: string; env?: Record<string, string>; encoding?: string },
-  callback?: (err: Error | null, stdout: string, stderr: string) => void
+  optionsOrCallback?: { cwd?: string; env?: Record<string, string>; encoding?: string; timeout?: number; maxBuffer?: number } | ((error: Error | null, stdout: string, stderr: string) => void),
+  callback?: (error: Error | null, stdout: string, stderr: string) => void
 ): ChildProcess {
-  if (typeof options === 'function') {
-    callback = options;
-    options = {};
+  let options: { cwd?: string; env?: Record<string, string>; encoding?: string; timeout?: number; maxBuffer?: number } = {};
+  let cb: ((error: Error | null, stdout: string, stderr: string) => void) | undefined;
+
+  if (typeof optionsOrCallback === 'function') {
+    cb = optionsOrCallback;
+  } else {
+    options = optionsOrCallback || {};
+    cb = callback;
   }
 
-  const parts = command.split(/\s+/);
+  const parts = parseCommand(command);
   const cmd = parts[0];
   const args = parts.slice(1);
-  const child = spawn(cmd, args, options);
 
-  let stdout = '';
-  let stderr = '';
+  const child = spawn(cmd, args, {
+    cwd: options.cwd,
+    env: options.env,
+    stdin: 'pipe',
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+
+  const stdoutChunks: Buffer[] = [];
+  const stderrChunks: Buffer[] = [];
+  const maxBuffer = options.maxBuffer || 1024 * 1024;
+  let stdoutLen = 0;
+  let stderrLen = 0;
+  let timedOut = false;
+  let timeoutHandle: ReturnType<typeof globalThis.setTimeout> | undefined;
+
+  if (options.timeout && options.timeout > 0) {
+    timeoutHandle = globalThis.setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+    }, options.timeout);
+  }
 
   if (child.stdout) {
-    child.stdout.on('data', (chunk: any) => {
-      stdout += typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk);
+    child.stdout.on('data', (data: unknown) => {
+      const buf = typeof data === 'string' ? Buffer.from(data) : data as Buffer;
+      stdoutLen += buf.length;
+      if (stdoutLen > maxBuffer) {
+        child.kill('SIGTERM');
+        return;
+      }
+      stdoutChunks.push(buf);
     });
   }
 
   if (child.stderr) {
-    child.stderr.on('data', (chunk: any) => {
-      stderr += typeof chunk === 'string' ? chunk : new TextDecoder().decode(chunk);
+    child.stderr.on('data', (data: unknown) => {
+      const buf = typeof data === 'string' ? Buffer.from(data) : data as Buffer;
+      stderrLen += buf.length;
+      if (stderrLen > maxBuffer) {
+        child.kill('SIGTERM');
+        return;
+      }
+      stderrChunks.push(buf);
     });
   }
 
-  child.on('exit', (code: number) => {
-    if (callback) {
-      if (code !== 0) {
-        const err = new Error(`Command failed: ${command}`) as Error & { code: number };
-        err.code = code;
-        callback(err, stdout, stderr);
-      } else {
-        callback(null, stdout, stderr);
-      }
+  child.on('close', (code: number) => {
+    if (timeoutHandle) {
+      globalThis.clearTimeout(timeoutHandle);
     }
+
+    const encoding = options.encoding || 'utf8';
+    const stdout = Buffer.concat(stdoutChunks).toString(encoding);
+    const stderr = Buffer.concat(stderrChunks).toString(encoding);
+
+    let error: (Error & { code?: number; killed?: boolean; signal?: string }) | null = null;
+    if (code !== 0 || timedOut) {
+      error = new Error(`Command failed: ${command}`);
+      error.code = code;
+      error.killed = timedOut;
+      if (timedOut) error.signal = 'SIGTERM';
+    }
+
+    if (cb) cb(error, stdout, stderr);
+  });
+
+  child.on('error', (err: Error) => {
+    if (timeoutHandle) {
+      globalThis.clearTimeout(timeoutHandle);
+    }
+    if (cb) cb(err, '', '');
   });
 
   return child;
 }
 
-export function execSync(command: string, options?: { cwd?: string; encoding?: string }): string | Buffer {
-  // In a worker context with SharedArrayBuffer, this could be truly synchronous
-  // For now, throw as it requires synchronous blocking
-  if (typeof (globalThis as any).__syscall === 'function') {
-    const parts = command.split(/\s+/);
-    const result = (globalThis as any).__syscall(50 /* PROCESS_SPAWN */, {
-      cmd: parts[0],
-      args: parts.slice(1),
-      cwd: options?.cwd ?? '/home/project',
-      sync: true,
-    });
-    return result?.stdout ?? '';
-  }
-  throw new Error(`execSync not available outside worker context`);
-}
+export function execSync(
+  command: string,
+  options?: { cwd?: string; env?: Record<string, string>; encoding?: string; timeout?: number; input?: string | Buffer }
+): string | Buffer {
+  const syscall = getSyscall();
+  const parts = parseCommand(command);
+  const cmd = parts[0];
+  const args = parts.slice(1);
 
-export function fork(modulePath: string, args?: string[], options?: { cwd?: string; env?: Record<string, string> }): ChildProcess {
-  return spawn('node', [modulePath, ...(args ?? [])], options);
+  const result = syscall(SyscallType.PROCESS_SPAWN, {
+    cmd,
+    args,
+    cwd: options?.cwd,
+    env: options?.env,
+    stdin: options?.input ? 'pipe' : 'inherit',
+    stdout: 'pipe',
+    stderr: 'pipe',
+    sync: true,
+    input: options?.input,
+  }) as { stdout: Uint8Array; stderr: Uint8Array; status: number; error?: string };
+
+  if (result.error) {
+    throw new Error(result.error);
+  }
+
+  if (result.status !== 0) {
+    const err = new Error(`Command failed: ${command}`) as Error & { status: number; stdout: Buffer; stderr: Buffer };
+    err.status = result.status;
+    err.stdout = Buffer.from(result.stdout || new Uint8Array(0));
+    err.stderr = Buffer.from(result.stderr || new Uint8Array(0));
+    throw err;
+  }
+
+  const encoding = options?.encoding;
+  const stdout = Buffer.from(result.stdout || new Uint8Array(0));
+
+  if (encoding && encoding !== 'buffer') {
+    return stdout.toString(encoding);
+  }
+  return stdout;
 }
 
 export function execFile(
   file: string,
-  args?: string[],
-  options?: { cwd?: string; env?: Record<string, string> },
-  callback?: (err: Error | null, stdout: string, stderr: string) => void
+  args?: string[] | ((error: Error | null, stdout: string, stderr: string) => void),
+  options?: { cwd?: string; env?: Record<string, string>; encoding?: string; timeout?: number; maxBuffer?: number } | ((error: Error | null, stdout: string, stderr: string) => void),
+  callback?: (error: Error | null, stdout: string, stderr: string) => void
 ): ChildProcess {
-  return spawn(file, args, options);
+  let actualArgs: string[];
+  let actualOptions: { cwd?: string; env?: Record<string, string> } = {};
+  let cb: ((error: Error | null, stdout: string, stderr: string) => void) | undefined;
+
+  if (typeof args === 'function') {
+    cb = args;
+    actualArgs = [];
+  } else {
+    actualArgs = args || [];
+    if (typeof options === 'function') {
+      cb = options;
+    } else {
+      actualOptions = options || {};
+      cb = callback;
+    }
+  }
+
+  const command = file + (actualArgs.length > 0 ? ' ' + actualArgs.join(' ') : '');
+  return exec(command, { ...actualOptions, encoding: 'utf8' }, cb);
 }
 
-export default { spawn, exec, execSync, fork, execFile, ChildProcess };
+export function fork(
+  modulePath: string,
+  args?: string[] | { cwd?: string; env?: Record<string, string> },
+  options?: { cwd?: string; env?: Record<string, string> }
+): ChildProcess {
+  let actualArgs: string[];
+  let actualOptions: { cwd?: string; env?: Record<string, string> };
+
+  if (Array.isArray(args)) {
+    actualArgs = args;
+    actualOptions = options || {};
+  } else {
+    actualArgs = [];
+    actualOptions = args || {};
+  }
+
+  const child = spawn('node', [modulePath, ...actualArgs], {
+    cwd: actualOptions.cwd,
+    env: actualOptions.env,
+    stdin: 'pipe',
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+
+  child.send = (message: unknown, _sendHandle?: unknown, _options?: unknown, callback?: (error: Error | null) => void): boolean => {
+    try {
+      const syscall = getSyscall();
+      syscall(SyscallType.PROCESS_SPAWN, {
+        pid: child.pid,
+        ipcMessage: message,
+      });
+      if (callback) callback(null);
+      return true;
+    } catch (err) {
+      if (callback) callback(err as Error);
+      return false;
+    }
+  };
+
+  return child;
+}
+
+export function spawnSync(
+  command: string,
+  args?: string[],
+  options?: { cwd?: string; env?: Record<string, string>; encoding?: string; input?: string | Buffer; timeout?: number }
+): { stdout: Buffer | string; stderr: Buffer | string; status: number | null; signal: string | null; error?: Error } {
+  try {
+    const syscall = getSyscall();
+    const result = syscall(SyscallType.PROCESS_SPAWN, {
+      cmd: command,
+      args: args || [],
+      cwd: options?.cwd,
+      env: options?.env,
+      stdin: options?.input ? 'pipe' : 'inherit',
+      stdout: 'pipe',
+      stderr: 'pipe',
+      sync: true,
+      input: options?.input,
+    }) as { stdout: Uint8Array; stderr: Uint8Array; status: number; error?: string };
+
+    const encoding = options?.encoding;
+    const stdout = Buffer.from(result.stdout || new Uint8Array(0));
+    const stderr = Buffer.from(result.stderr || new Uint8Array(0));
+
+    return {
+      stdout: encoding && encoding !== 'buffer' ? stdout.toString(encoding) : stdout,
+      stderr: encoding && encoding !== 'buffer' ? stderr.toString(encoding) : stderr,
+      status: result.status,
+      signal: null,
+      error: result.error ? new Error(result.error) : undefined,
+    };
+  } catch (err) {
+    return {
+      stdout: Buffer.alloc(0),
+      stderr: Buffer.alloc(0),
+      status: null,
+      signal: null,
+      error: err instanceof Error ? err : new Error(String(err)),
+    };
+  }
+}
+
+function parseCommand(cmd: string): string[] {
+  const parts: string[] = [];
+  let current = '';
+  let inSingle = false;
+  let inDouble = false;
+  let escape = false;
+
+  for (let i = 0; i < cmd.length; i++) {
+    const ch = cmd[i];
+
+    if (escape) {
+      current += ch;
+      escape = false;
+      continue;
+    }
+
+    if (ch === '\\') {
+      escape = true;
+      continue;
+    }
+
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+
+    if (ch === ' ' && !inSingle && !inDouble) {
+      if (current.length > 0) {
+        parts.push(current);
+        current = '';
+      }
+      continue;
+    }
+
+    current += ch;
+  }
+
+  if (current.length > 0) {
+    parts.push(current);
+  }
+
+  return parts;
+}
+
+export default {
+  ChildProcess,
+  spawn,
+  exec,
+  execSync,
+  execFile,
+  fork,
+  spawnSync,
+};

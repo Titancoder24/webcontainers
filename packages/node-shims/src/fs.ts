@@ -65,7 +65,7 @@ export function writeFileSync(filePath: string, data: string | Buffer | Uint8Arr
   if (typeof data === 'string') {
     content = Buffer.from(data, encoding || 'utf8');
   } else {
-    content = data;
+    content = data instanceof Buffer ? (data as unknown as Uint8Array) : data;
   }
 
   const result = syscall(SyscallType.FS_WRITEFILE, { path: filePath, data: content }) as { error?: string } | undefined;
@@ -82,7 +82,7 @@ export function appendFileSync(filePath: string, data: string | Buffer | Uint8Ar
   if (typeof data === 'string') {
     content = Buffer.from(data, encoding || 'utf8');
   } else {
-    content = data;
+    content = data instanceof Buffer ? (data as unknown as Uint8Array) : data;
   }
 
   const result = syscall(SyscallType.FS_APPENDFILE, { path: filePath, data: content }) as { error?: string } | undefined;
@@ -292,8 +292,10 @@ export function writeFile(filePath: string, data: string | Buffer | Uint8Array, 
   });
 }
 
-function wrapAsync<T>(fn: (...args: unknown[]) => T) {
-  return (...args: unknown[]): Promise<T> => {
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function wrapAsync<T>(fn: (...args: any[]) => T) {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  return (...args: any[]): Promise<T> => {
     return new Promise((resolve, reject) => {
       try {
         resolve(fn(...args));
