@@ -1,0 +1,12 @@
+{
+  "name": "@aspect/shell",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": { ".": { "import": "./dist/index.js", "types": "./dist/index.d.ts" } },
+  "scripts": { "build": "tsc", "dev": "tsc --watch", "test": "vitest run", "clean": "rm -rf dist" },
+  "dependencies": { "@aspect/shared": "*", "@aspect/vfs": "*" },
+  "devDependencies": { "typescript": "^5.4.0", "vitest": "^1.6.0" }
+}
