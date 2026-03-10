@@ -163,6 +163,7 @@ function decodeBytes(bytes: Uint8Array, encoding: BufferEncoding): string {
   }
 }
 
+// @ts-ignore - Buffer extends Uint8Array with different static signatures
 export class Buffer extends Uint8Array {
   /**
    * Creates a Buffer from various inputs.
@@ -294,8 +295,7 @@ export class Buffer extends Uint8Array {
     return maxLen;
   }
 
-  // @ts-expect-error - Buffer.slice returns Buffer, not Uint8Array
-  slice(start?: number, end?: number): Buffer {
+  override slice(start?: number, end?: number): Buffer {
     const sliced = super.slice(start, end);
     const buf = new Buffer(sliced.length);
     buf.set(sliced);
@@ -400,10 +400,9 @@ export class Buffer extends Uint8Array {
     };
   }
 
-  // @ts-expect-error - overriding Uint8Array tag
-  get [Symbol.toStringTag](): 'Buffer' {
-    return 'Buffer';
-  }
+  // We intentionally do NOT override [Symbol.toStringTag] to avoid
+  // incompatibility with Uint8Array's typed tag.
+  // Buffer identity is checked via isBuffer() instead.
 }
 
 export default { Buffer };

@@ -10,7 +10,7 @@ async function compressData(data: Uint8Array, format: CompressionFormat): Promis
   const writer = stream.writable.getWriter();
   const reader = stream.readable.getReader();
 
-  writer.write(data);
+  writer.write(data as unknown as Uint8Array<ArrayBuffer>);
   writer.close();
 
   const chunks: Uint8Array[] = [];
@@ -36,7 +36,7 @@ async function decompressData(data: Uint8Array, format: CompressionFormat): Prom
   const writer = stream.writable.getWriter();
   const reader = stream.readable.getReader();
 
-  writer.write(data);
+  writer.write(data as unknown as Uint8Array<ArrayBuffer>);
   writer.close();
 
   const chunks: Uint8Array[] = [];

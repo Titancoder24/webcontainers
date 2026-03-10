@@ -307,7 +307,9 @@ export const types = {
   },
 };
 
-export { TextEncoder, TextDecoder };
+const _TextEncoder = globalThis.TextEncoder;
+const _TextDecoder = globalThis.TextDecoder;
+export { _TextEncoder as TextEncoder, _TextDecoder as TextDecoder };
 
 export function callbackify(fn: (...args: unknown[]) => Promise<unknown>): (...args: unknown[]) => void {
   return function (this: unknown, ...args: unknown[]) {
@@ -367,6 +369,6 @@ export default {
   types,
   callbackify,
   isDeepStrictEqual,
-  TextEncoder,
-  TextDecoder,
+  TextEncoder: _TextEncoder,
+  TextDecoder: _TextDecoder,
 };
